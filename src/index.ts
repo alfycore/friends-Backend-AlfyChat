@@ -12,7 +12,7 @@ import { v4 as uuidv4 } from 'uuid';
 import mysql, { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import winston from 'winston';
 import { authMiddleware } from './middleware/auth';
-import { startServiceRegistration, serviceMetricsMiddleware } from './utils/service-client';
+import { startServiceRegistration, serviceMetricsMiddleware, collectServiceMetrics } from './utils/service-client';
 
 dotenv.config();
 
@@ -507,6 +507,16 @@ app.use('/friends', friendsRouter);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'friends' });
+});
+
+app.get('/metrics', (req, res) => {
+  res.json({
+    service: 'friends',
+    serviceId: process.env.SERVICE_ID || 'friends-default',
+    location: (process.env.SERVICE_LOCATION || 'EU').toUpperCase(),
+    ...collectServiceMetrics(),
+    uptime: process.uptime(),
+  });
 });
 
 async function start() {
