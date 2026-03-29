@@ -12,6 +12,7 @@ import { v4 as uuidv4 } from 'uuid';
 import mysql, { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import winston from 'winston';
 import { authMiddleware } from './middleware/auth';
+import { startServiceRegistration, serviceMetricsMiddleware } from './utils/service-client';
 
 dotenv.config();
 
@@ -30,6 +31,7 @@ app.use(cors({
 }));
 app.use(helmet());
 app.use(express.json());
+app.use(serviceMetricsMiddleware);
 
 // Logger
 const logger = winston.createLogger({
@@ -535,6 +537,7 @@ async function start() {
     const PORT = process.env.PORT || 3003;
     app.listen(PORT, () => {
       logger.info(`🚀 Service Friends démarré sur le port ${PORT}`);
+      startServiceRegistration('friends');
     });
   } catch (error) {
     logger.error('Erreur au démarrage:', error);
