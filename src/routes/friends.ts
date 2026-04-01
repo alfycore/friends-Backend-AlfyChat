@@ -83,3 +83,11 @@ friendsRouter.get('/check/:userId1/:userId2',
   validateRequest,
   friendController.checkFriendship.bind(friendController)
 );
+
+// Vérifier le statut de blocage
+friendsRouter.get('/block-status/:userId/:otherId',
+  param('userId').isUUID(),
+  param('otherId').isUUID(),
+  validateRequest,
+  friendController.getBlockStatus.bind(friendController)
+);

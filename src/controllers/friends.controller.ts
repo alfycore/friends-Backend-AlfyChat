@@ -146,6 +146,18 @@ export class FriendController {
       res.status(500).json({ error: 'Erreur serveur' });
     }
   }
+
+  // Vérifier le statut de blocage entre deux utilisateurs
+  async getBlockStatus(req: Request, res: Response) {
+    try {
+      const { userId, otherId } = req.params;
+      const status = await friendService.getBlockStatus(userId, otherId);
+      res.json(status);
+    } catch (error) {
+      logger.error('Erreur vérification blocage:', error);
+      res.status(500).json({ error: 'Erreur serveur' });
+    }
+  }
 }
 
 export const friendController = new FriendController();

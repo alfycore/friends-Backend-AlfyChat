@@ -213,6 +213,22 @@ export class FriendService {
     return (rows as any[]).length > 0;
   }
 
+  async getBlockStatus(userId: string, otherId: string): Promise<{ iBlockedThem: boolean; theyBlockedMe: boolean }> {
+    const [rows] = await this.db.query(
+      `SELECT user_id, friend_id FROM friends
+       WHERE ((user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?))
+       AND status = 'blocked'`,
+      [userId, otherId, otherId, userId]
+    );
+    let iBlockedThem = false;
+    let theyBlockedMe = false;
+    for (const row of rows as any[]) {
+      if (row.user_id === userId) iBlockedThem = true;
+      if (row.user_id === otherId) theyBlockedMe = true;
+    }
+    return { iBlockedThem, theyBlockedMe };
+  }
+
   // Helpers privés
   private async getUserInfo(userId: string): Promise<FriendUser | null> {
     const [rows] = await this.db.query(

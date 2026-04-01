@@ -503,6 +503,34 @@ friendsRouter.get('/blocked', authMiddleware, async (req, res) => {
   }
 });
 
+// Vérifier le statut de blocage avec un autre utilisateur
+friendsRouter.get('/block-status/:otherId', authMiddleware, async (req, res) => {
+  try {
+    const userId = (req as any).userId;
+    const { otherId } = req.params;
+    const db = getDb();
+
+    const [rows] = await db.query<RowDataPacket[]>(
+      `SELECT user_id, friend_id FROM friends
+       WHERE ((user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?))
+       AND status = 'blocked'`,
+      [userId, otherId, otherId, userId]
+    );
+
+    let iBlockedThem = false;
+    let theyBlockedMe = false;
+    for (const row of rows) {
+      if (row.user_id === userId) iBlockedThem = true;
+      if (row.user_id === otherId) theyBlockedMe = true;
+    }
+
+    res.json({ iBlockedThem, theyBlockedMe });
+  } catch (error) {
+    logger.error('Erreur vérification blocage:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
 app.use('/friends', friendsRouter);
 
 app.get('/health', (req, res) => {
