@@ -60,6 +60,42 @@ function getDb() {
   };
 }
 
+// Helper partagé : récupère les infos utilisateur depuis la DB MySQL commune.
+// On lit directement la table `users` — pas de round-trip HTTP, donc plus de
+// fallback "Unknown" quand le service users n'est pas joignable.
+interface UserInfoRow {
+  id: string;
+  username: string;
+  display_name: string | null;
+  avatar_url: string | null;
+  status: string | null;
+  is_online: number | boolean | null;
+}
+async function fetchUsersByIds(userIds: string[]): Promise<Record<string, {
+  id: string; username: string; displayName: string | null; avatarUrl: string | null;
+  status: string; isOnline: boolean;
+}>> {
+  if (userIds.length === 0) return {};
+  const placeholders = userIds.map(() => '?').join(',');
+  const [rows] = await pool.execute<RowDataPacket[]>(
+    `SELECT id, username, display_name, avatar_url, status, is_online
+     FROM users WHERE id IN (${placeholders})`,
+    userIds,
+  );
+  const map: Record<string, any> = {};
+  for (const r of rows as UserInfoRow[]) {
+    map[r.id] = {
+      id: r.id,
+      username: r.username,
+      displayName: r.display_name,
+      avatarUrl: r.avatar_url,
+      status: r.status || 'offline',
+      isOnline: Boolean(r.is_online),
+    };
+  }
+  return map;
+}
+
 // Routes
 const friendsRouter = Router();
 
@@ -91,29 +127,9 @@ friendsRouter.get('/', authMiddleware, async (req, res) => {
       return res.json([]);
     }
     
-    // Récupérer les infos utilisateur depuis le service Users
     const friendIds = friendships.map((f: any) => f.friendId);
-    const USERS_URL = process.env.USERS_SERVICE_URL || 'http://localhost:3001';
-    
-    try {
-      const usersResponse = await fetch(`${USERS_URL}/users/batch?ids=${friendIds.join(',')}`, {
-        headers: {
-          'Authorization': (req as any).headers.authorization || '',
-        },
-      });
-      
-      if (!usersResponse.ok) {
-        // Si échec, retourner juste les IDs
-        return res.json(friendIds.map(id => ({ id, username: 'Unknown', displayName: 'Unknown', status: 'offline', isOnline: false })));
-      }
-      
-      const users = await usersResponse.json();
-      res.json(users);
-    } catch (error) {
-      logger.error('Erreur récupération infos utilisateurs:', error);
-      // En cas d'erreur, retourner juste les IDs
-      res.json(friendIds.map(id => ({ id, username: 'Unknown', displayName: 'Unknown', status: 'offline', isOnline: false })));
-    }
+    const usersMap = await fetchUsersByIds(friendIds);
+    res.json(friendIds.map((id) => usersMap[id]).filter(Boolean));
   } catch (error) {
     logger.error('Erreur récupération amis:', error);
     res.status(500).json({ error: 'Erreur serveur' });
@@ -219,48 +235,38 @@ friendsRouter.get('/requests', authMiddleware, async (req, res) => {
       return res.json({ received: [], sent: [] });
     }
     
-    const USERS_URL = process.env.USERS_SERVICE_URL || 'http://localhost:3001';
-    
-    try {
-      const usersResponse = await fetch(`${USERS_URL}/users/batch?ids=${allUserIds.join(',')}`, {
-        headers: {
-          'Authorization': (req as any).headers.authorization || '',
-        },
-      });
-      
-      let usersMap: any = {};
-      
-      if (usersResponse.ok) {
-        const users: any = await usersResponse.json();
-        usersMap = users.reduce((acc: any, u: any) => {
-          acc[u.id] = u;
-          return acc;
-        }, {});
-      }
-      
-      // Mapper les résultats
-      const received = receivedRows.map((r: any) => ({
-        id: r.id,
-        userId: r.userId,
-        username: usersMap[r.userId]?.username || 'Unknown',
-        displayName: usersMap[r.userId]?.displayName || 'Unknown',
-        avatarUrl: usersMap[r.userId]?.avatarUrl,
-        message: 'Demande d\'ami'
-      }));
-      
-      const sent = sentRows.map((s: any) => ({
-        id: s.id,
-        userId: s.userId,
-        username: usersMap[s.userId]?.username || 'Unknown',
-        displayName: usersMap[s.userId]?.displayName || 'Unknown',
-        avatarUrl: usersMap[s.userId]?.avatarUrl
-      }));
-      
-      res.json({ received, sent });
-    } catch (error) {
-      logger.error('Erreur récupération infos utilisateurs:', error);
-      res.json({ received: [], sent: [] });
-    }
+    const usersMap = await fetchUsersByIds(allUserIds);
+
+    const received = receivedRows
+      .map((r: any) => {
+        const u = usersMap[r.userId];
+        if (!u) return null;
+        return {
+          id: r.id,
+          userId: r.userId,
+          username: u.username,
+          displayName: u.displayName,
+          avatarUrl: u.avatarUrl,
+          message: 'Demande d\'ami',
+        };
+      })
+      .filter(Boolean);
+
+    const sent = sentRows
+      .map((s: any) => {
+        const u = usersMap[s.userId];
+        if (!u) return null;
+        return {
+          id: s.id,
+          userId: s.userId,
+          username: u.username,
+          displayName: u.displayName,
+          avatarUrl: u.avatarUrl,
+        };
+      })
+      .filter(Boolean);
+
+    res.json({ received, sent });
   } catch (error) {
     logger.error('Erreur récupération demandes:', error);
     res.status(500).json({ error: 'Erreur serveur' });
