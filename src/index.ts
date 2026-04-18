@@ -371,10 +371,10 @@ friendsRouter.post('/requests',
 );
 
 // Accepter une demande d'ami
-friendsRouter.post('/requests/:requestId/accept', async (req, res) => {
+friendsRouter.post('/requests/:requestId/accept', authMiddleware, async (req, res) => {
   try {
     const { requestId } = req.params;
-    const { userId } = req.body;
+    const userId = (req as any).userId;
     const db = getDb();
 
     // Vérifier que la demande existe et est pour cet utilisateur
@@ -403,10 +403,10 @@ friendsRouter.post('/requests/:requestId/accept', async (req, res) => {
 });
 
 // Refuser une demande d'ami
-friendsRouter.post('/requests/:requestId/decline', async (req, res) => {
+friendsRouter.post('/requests/:requestId/decline', authMiddleware, async (req, res) => {
   try {
     const { requestId } = req.params;
-    const { userId } = req.body;
+    const userId = (req as any).userId;
     const db = getDb();
 
     await db.execute(
@@ -422,10 +422,10 @@ friendsRouter.post('/requests/:requestId/decline', async (req, res) => {
 });
 
 // Supprimer un ami
-friendsRouter.delete('/:friendId', async (req, res) => {
+friendsRouter.delete('/:friendId', authMiddleware, async (req, res) => {
   try {
     const { friendId } = req.params;
-    const { userId } = req.body;
+    const userId = (req as any).userId;
     const db = getDb();
 
     await db.execute(
@@ -442,10 +442,10 @@ friendsRouter.delete('/:friendId', async (req, res) => {
 });
 
 // Bloquer un utilisateur
-friendsRouter.post('/:userId/block', async (req, res) => {
+friendsRouter.post('/:userId/block', authMiddleware, async (req, res) => {
   try {
     const { userId: targetId } = req.params;
-    const { userId } = req.body;
+    const userId = (req as any).userId;
     const db = getDb();
     const id = uuidv4();
 
@@ -470,10 +470,10 @@ friendsRouter.post('/:userId/block', async (req, res) => {
 });
 
 // Débloquer un utilisateur
-friendsRouter.post('/:userId/unblock', async (req, res) => {
+friendsRouter.post('/:userId/unblock', authMiddleware, async (req, res) => {
   try {
     const { userId: targetId } = req.params;
-    const { userId } = req.body;
+    const userId = (req as any).userId;
     const db = getDb();
 
     await db.execute(
