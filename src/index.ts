@@ -541,6 +541,55 @@ friendsRouter.get('/block-status/:otherId', authMiddleware, async (req, res) => 
   }
 });
 
+// Amis en commun + statut de relation avec un autre utilisateur (pour la popup de profil)
+friendsRouter.get('/mutual/:otherId', authMiddleware, async (req, res) => {
+  try {
+    const userId = (req as any).userId;
+    const { otherId } = req.params;
+    const db = getDb();
+
+    if (otherId === userId) {
+      return res.json({ mutualFriends: [], friendState: 'friends' });
+    }
+
+    const friendIdsOf = async (id: string): Promise<string[]> => {
+      const [rows] = await db.query<RowDataPacket[]>(
+        `SELECT CASE WHEN user_id = ? THEN friend_id ELSE user_id END as friendId
+         FROM friends
+         WHERE (user_id = ? OR friend_id = ?) AND status = 'accepted'`,
+        [id, id, id]
+      );
+      return (rows as any[]).map((r) => r.friendId);
+    };
+
+    const [mine, theirs] = await Promise.all([friendIdsOf(userId), friendIdsOf(otherId)]);
+    const theirSet = new Set(theirs);
+    const mutualIds = mine.filter((id) => theirSet.has(id));
+
+    const usersMap = await fetchUsersByIds(mutualIds);
+    const mutualFriends = mutualIds.map((id) => usersMap[id]).filter(Boolean);
+
+    // Statut de relation (ignore les lignes 'blocked', gérées par /block-status)
+    const [relRows] = await db.query<RowDataPacket[]>(
+      `SELECT user_id, status FROM friends
+       WHERE ((user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?))
+         AND status IN ('pending', 'accepted')`,
+      [userId, otherId, otherId, userId]
+    );
+
+    let friendState: 'none' | 'friends' | 'pending_sent' | 'pending_received' = 'none';
+    for (const row of relRows as any[]) {
+      if (row.status === 'accepted') { friendState = 'friends'; break; }
+      friendState = row.user_id === userId ? 'pending_sent' : 'pending_received';
+    }
+
+    res.json({ mutualFriends, friendState });
+  } catch (error) {
+    logger.error('Erreur amis en commun:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
 app.use('/friends', friendsRouter);
 
 app.get('/health', (req, res) => {
