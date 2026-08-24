@@ -103,10 +103,6 @@ async function fetchUsersByIds(userIds: string[]): Promise<Record<string, {
 // Routes
 const friendsRouter = Router();
 
-// Stockage temporaire en mémoire (pour le debug)
-let tempFriends: any[] = [];
-let tempRequests: { id: string; fromUser: string; toUser: string; status: string; createdAt: string }[] = [];
-
 // Récupérer les amis
 friendsRouter.get('/', authMiddleware, async (req, res) => {
   try {
@@ -450,20 +446,28 @@ friendsRouter.post('/:userId/block', authMiddleware, async (req, res) => {
   try {
     const { userId: targetId } = req.params;
     const userId = (req as any).userId;
+    if (!targetId || targetId === userId) {
+      return res.status(400).json({ error: 'Cible de blocage invalide' });
+    }
     const db = getDb();
     const id = uuidv4();
 
-    // Supprimer toute relation existante
+    // Supprimer l'amitié / la demande en cours, dans les deux sens — mais JAMAIS
+    // un blocage posé par la cible. L'ancien DELETE emportait aussi la ligne de
+    // la cible : bloquer puis débloquer suffisait donc à lever le blocage que
+    // l'autre avait mis sur soi.
     await db.execute(
-      `DELETE FROM friends 
-       WHERE (user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)`,
+      `DELETE FROM friends
+       WHERE ((user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?))
+         AND status <> 'blocked'`,
       [userId, targetId, targetId, userId]
     );
 
-    // Créer un blocage
+    // Créer (ou conserver) le blocage de l'appelant vers la cible.
     await db.execute(
-      'INSERT INTO friends (id, user_id, friend_id, status) VALUES (?, ?, ?, ?)',
-      [id, userId, targetId, 'blocked']
+      `INSERT INTO friends (id, user_id, friend_id, status) VALUES (?, ?, ?, 'blocked')
+       ON DUPLICATE KEY UPDATE status = 'blocked'`,
+      [id, userId, targetId]
     );
 
     res.json({ success: true });
