@@ -100,6 +100,65 @@ async function fetchUsersByIds(userIds: string[]): Promise<Record<string, {
   return map;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * La cible accepte-t-elle les demandes d'ami ? Le réglage
+ * `privacy_allow_friend_requests` était enregistré mais jamais appliqué.
+ * Absence de ligne de préférences = réglage par défaut (accepte).
+ */
+async function acceptsFriendRequests(targetUserId: string): Promise<boolean> {
+  const [rows] = await pool.execute<RowDataPacket[]>(
+    'SELECT privacy_allow_friend_requests FROM user_preferences WHERE user_id = ?',
+    [targetUserId],
+  );
+  if (!(rows as any[]).length) return true;
+  const v = (rows as any[])[0].privacy_allow_friend_requests;
+  return v === null || v === undefined || v === 1 || v === true;
+}
+
+/**
+ * Logique commune d'envoi d'une demande d'ami. L'expéditeur est TOUJOURS
+ * l'utilisateur authentifié.
+ */
+async function createFriendRequest(fromUserId: string, targetUserId: string): Promise<
+  { status: number; body: Record<string, unknown> }
+> {
+  if (targetUserId === fromUserId) {
+    return { status: 400, body: { error: 'Vous ne pouvez pas vous envoyer une demande d\'ami' } };
+  }
+  const db = getDb();
+  const [users] = await db.query<RowDataPacket[]>('SELECT id FROM users WHERE id = ?', [targetUserId]);
+  if (users.length === 0) return { status: 404, body: { error: 'Utilisateur non trouvé' } };
+
+  const [existing] = await db.query<RowDataPacket[]>(
+    `SELECT id, status FROM friends
+     WHERE (user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)`,
+    [fromUserId, targetUserId, targetUserId, fromUserId]
+  );
+  if (existing.length > 0) {
+    // Même réponse qu'il y ait un blocage ou non : ne pas révéler un blocage.
+    if ((existing as any[]).some((r) => r.status === 'blocked')) {
+      return { status: 403, body: { error: 'Impossible d\'envoyer une demande' } };
+    }
+    return { status: 409, body: { error: 'Demande déjà envoyée ou déjà amis' } };
+  }
+  if (!(await acceptsFriendRequests(targetUserId))) {
+    return { status: 403, body: { error: 'Impossible d\'envoyer une demande' } };
+  }
+
+  const requestId = uuidv4();
+  await db.execute(
+    'INSERT INTO friends (id, user_id, friend_id, status) VALUES (?, ?, ?, ?)',
+    [requestId, fromUserId, targetUserId, 'pending']
+  );
+  logger.info(`Demande d'ami ajoutée: ${requestId}`);
+  return {
+    status: 201,
+    body: { success: true, message: 'Demande envoyée', id: requestId, toUserId: targetUserId, fromUserId, status: 'pending' },
+  };
+}
+
 // Routes
 const friendsRouter = Router();
 
@@ -108,25 +167,25 @@ friendsRouter.get('/', authMiddleware, async (req, res) => {
   try {
     const userId = (req as any).userId;
     const db = getDb();
-    
+
     // Récupérer les IDs des amis acceptés depuis la DB
     const [friendships] = await db.query<RowDataPacket[]>(
-      `SELECT 
-         CASE 
-           WHEN user_id = ? THEN friend_id 
-           ELSE user_id 
+      `SELECT
+         CASE
+           WHEN user_id = ? THEN friend_id
+           ELSE user_id
          END as friendId
        FROM friends
-       WHERE (user_id = ? OR friend_id = ?) 
+       WHERE (user_id = ? OR friend_id = ?)
          AND status = 'accepted'`,
       [userId, userId, userId]
     );
-    
+
     // Si pas d'amis, retourner un tableau vide
     if (friendships.length === 0) {
       return res.json([]);
     }
-    
+
     const friendIds = friendships.map((f: any) => f.friendId);
     const usersMap = await fetchUsersByIds(friendIds);
     res.json(friendIds.map((id) => usersMap[id]).filter(Boolean));
@@ -141,57 +200,32 @@ friendsRouter.post('/request', authMiddleware, async (req, res) => {
   try {
     const userIdOrUsername = req.body.userId || req.body.targetUserId;
     const fromUserId = (req as any).userId;
-    
-    if (!userIdOrUsername) {
+
+    if (!userIdOrUsername || typeof userIdOrUsername !== 'string' || userIdOrUsername.length > 64) {
       return res.status(400).json({ error: 'UserId ou username requis' });
     }
 
     const db = getDb();
-    
+
     // Chercher l'utilisateur par ID ou username
     let targetUserId = userIdOrUsername;
-    
+
     // Si ce n'est pas un UUID, chercher par username
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userIdOrUsername)) {
+    if (!UUID_RE.test(userIdOrUsername)) {
       const [users] = await db.query<RowDataPacket[]>(
         'SELECT id FROM users WHERE username = ?',
         [userIdOrUsername]
       );
-      
+
       if (users.length === 0) {
         return res.status(404).json({ error: 'Utilisateur non trouvé' });
       }
-      
+
       targetUserId = users[0].id;
     }
-    
-    // Vérifier qu'on ne s'envoie pas une demande à soi-même
-    if (targetUserId === fromUserId) {
-      return res.status(400).json({ error: 'Vous ne pouvez pas vous envoyer une demande d\'ami' });
-    }
-    
-    const requestId = uuidv4();
-    
-    // Vérifier si une relation existe déjà
-    const [existing] = await db.query<RowDataPacket[]>(
-      `SELECT id, status FROM friends 
-       WHERE (user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)`,
-      [fromUserId, targetUserId, targetUserId, fromUserId]
-    );
 
-    if (existing.length > 0) {
-      return res.status(409).json({ error: 'Demande déjà envoyée ou déjà amis' });
-    }
-    
-    // Insérer la demande dans la DB
-    await db.execute(
-      'INSERT INTO friends (id, user_id, friend_id, status) VALUES (?, ?, ?, ?)',
-      [requestId, fromUserId, targetUserId, 'pending']
-    );
-
-    logger.info(`Demande d'ami ajoutée: ${requestId}`);
-
-    res.status(201).json({ success: true, message: 'Demande envoyée', id: requestId, toUserId: targetUserId, fromUserId });
+    const result = await createFriendRequest(fromUserId, targetUserId);
+    res.status(result.status).json(result.body);
   } catch (error) {
     logger.error('Erreur envoi demande:', error);
     res.status(500).json({ error: 'Erreur serveur' });
@@ -203,7 +237,7 @@ friendsRouter.get('/requests', authMiddleware, async (req, res) => {
   try {
     const userId = (req as any).userId;
     const db = getDb();
-    
+
     // Demandes reçues (IDs uniquement)
     const [receivedRows] = await db.query<RowDataPacket[]>(
       `SELECT f.id, f.user_id as userId
@@ -211,7 +245,7 @@ friendsRouter.get('/requests', authMiddleware, async (req, res) => {
        WHERE f.friend_id = ? AND f.status = 'pending'`,
       [userId]
     );
-    
+
     // Demandes envoyées (IDs uniquement)
     const [sentRows] = await db.query<RowDataPacket[]>(
       `SELECT f.id, f.friend_id as userId
@@ -219,22 +253,22 @@ friendsRouter.get('/requests', authMiddleware, async (req, res) => {
        WHERE f.user_id = ? AND f.status = 'pending'`,
       [userId]
     );
-    
+
     // Si pas de demandes, retourner des tableaux vides
     if (receivedRows.length === 0 && sentRows.length === 0) {
       return res.json({ received: [], sent: [] });
     }
-    
+
     // Récupérer les infos utilisateur depuis le service Users
     const allUserIds = [
       ...receivedRows.map((r: any) => r.userId),
       ...sentRows.map((s: any) => s.userId)
     ];
-    
+
     if (allUserIds.length === 0) {
       return res.json({ received: [], sent: [] });
     }
-    
+
     const usersMap = await fetchUsersByIds(allUserIds);
 
     const received = receivedRows
@@ -279,7 +313,7 @@ friendsRouter.post('/request/:requestId/accept', authMiddleware, async (req, res
     const { requestId } = req.params;
     const userId = (req as any).userId;
     const db = getDb();
-    
+
     // Vérifier que la demande existe et est pour cet utilisateur
     const [requests] = await db.query<RowDataPacket[]>(
       'SELECT * FROM friends WHERE id = ? AND friend_id = ? AND status = ?',
@@ -289,14 +323,14 @@ friendsRouter.post('/request/:requestId/accept', authMiddleware, async (req, res
     if (requests.length === 0) {
       return res.status(404).json({ error: 'Demande non trouvée' });
     }
-    
+
     await db.execute(
       'UPDATE friends SET status = ? WHERE id = ?',
       ['accepted', requestId]
     );
-    
+
     logger.info(`Demande d'ami acceptée: ${requestId}`);
-    
+
     res.json({ success: true, message: 'Demande acceptée' });
   } catch (error) {
     logger.error('Erreur acceptation demande:', error);
@@ -310,14 +344,14 @@ friendsRouter.post('/request/:requestId/decline', authMiddleware, async (req, re
     const { requestId } = req.params;
     const userId = (req as any).userId;
     const db = getDb();
-    
+
     await db.execute(
       'DELETE FROM friends WHERE id = ? AND friend_id = ? AND status = ?',
       [requestId, userId, 'pending']
     );
-    
+
     logger.info(`Demande d'ami refusée: ${requestId}`);
-    
+
     res.json({ success: true, message: 'Demande refusée' });
   } catch (error) {
     logger.error('Erreur refus demande:', error);
@@ -325,9 +359,12 @@ friendsRouter.post('/request/:requestId/decline', authMiddleware, async (req, re
   }
 });
 
-// Envoyer une demande d'ami
+// Envoyer une demande d'ami (chemin WebSocket du gateway).
+// La route n'avait AUCUNE authentification et prenait `fromUserId` dans le
+// corps : on fabriquait une demande « de la victime vers soi » puis on
+// l'acceptait — amitié forcée, sans consentement.
 friendsRouter.post('/requests',
-  body('fromUserId').isUUID(),
+  authMiddleware,
   body('toUserId').isUUID(),
   async (req, res) => {
     try {
@@ -336,33 +373,10 @@ friendsRouter.post('/requests',
         return res.status(400).json({ errors: errors.array() });
       }
 
-      const { fromUserId, toUserId, message } = req.body;
-      const db = getDb();
-      const id = uuidv4();
-
-      // Vérifier si une relation existe déjà
-      const [existing] = await db.query(
-        `SELECT id, status FROM friends 
-         WHERE (user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)`,
-        [fromUserId, toUserId, toUserId, fromUserId]
-      );
-
-      if (existing.length > 0) {
-        const relation = (existing as any[])[0];
-        if (relation.status === 'blocked') {
-          return res.status(403).json({ error: 'Impossible d\'envoyer une demande' });
-        }
-        return res.status(409).json({ error: 'Demande déjà envoyée ou déjà amis' });
-      }
-
-      await db.execute(
-        'INSERT INTO friends (id, user_id, friend_id, status) VALUES (?, ?, ?, ?)',
-        [id, fromUserId, toUserId, 'pending']
-      );
-
-      logger.info(`Demande d'ami envoyée: ${fromUserId} -> ${toUserId}`);
-
-      res.status(201).json({ id, fromUserId, toUserId, status: 'pending' });
+      const fromUserId = (req as any).userId as string;
+      const { toUserId } = req.body;
+      const result = await createFriendRequest(fromUserId, toUserId);
+      res.status(result.status).json(result.body);
     } catch (error) {
       logger.error('Erreur envoi demande:', error);
       res.status(500).json({ error: 'Erreur serveur' });
@@ -429,7 +443,7 @@ friendsRouter.delete('/:friendId', authMiddleware, async (req, res) => {
     const db = getDb();
 
     await db.execute(
-      `DELETE FROM friends 
+      `DELETE FROM friends
        WHERE (user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)`,
       [userId, friendId, friendId, userId]
     );
@@ -446,7 +460,7 @@ friendsRouter.post('/:userId/block', authMiddleware, async (req, res) => {
   try {
     const { userId: targetId } = req.params;
     const userId = (req as any).userId;
-    if (!targetId || targetId === userId) {
+    if (!targetId || !UUID_RE.test(targetId) || targetId === userId) {
       return res.status(400).json({ error: 'Cible de blocage invalide' });
     }
     const db = getDb();

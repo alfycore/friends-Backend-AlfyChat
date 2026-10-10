@@ -46,7 +46,7 @@ export async function authMiddleware(
     const token = authHeader.replace('Bearer ', '');
 
     // Vérifier le token
-    const decoded = jwt.verify(token, JWT_SECRET as string) as unknown as { userId: string };
+    const decoded = jwt.verify(token, JWT_SECRET as string, { algorithms: ['HS256'] }) as unknown as { userId: string };
     
     // Ajouter l'userId à la requête
     (req as any).userId = decoded.userId;
