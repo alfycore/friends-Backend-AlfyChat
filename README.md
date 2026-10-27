@@ -2,8 +2,7 @@
 
 Microservice de gestion des relations sociales pour AlfyChat.
 
-![Node.js](https://img.shields.io/badge/Bun-1.2-black?logo=bun)
-![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript)
+![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go)
 ![License](https://img.shields.io/badge/License-Source_Available-blue)
 
 ## Rôle
@@ -14,11 +13,9 @@ Ce service gère les demandes d'amis, les listes d'amis, le blocage d'utilisateu
 
 | Catégorie | Technologies |
 |-----------|-------------|
-| Runtime | Bun |
-| Langage | TypeScript |
-| API | Express |
-| Auth | JWT |
-| Cache | Redis |
+| Langage | Go 1.26 |
+| API | net/http (stdlib) |
+| Auth | JWT HS256 (golang-jwt) |
 | Base de données | MySQL 8 |
 
 ## Architecture globale
@@ -38,9 +35,8 @@ Frontend (:4000)  →  Gateway (:3000)  →  Microservices
 
 ### Prérequis
 
-- [Bun](https://bun.sh/) ≥ 1.2
+- [Go](https://go.dev/) ≥ 1.26
 - MySQL 8
-- Redis 7
 
 ### Variables d'environnement
 
@@ -50,29 +46,31 @@ DB_HOST=localhost
 DB_PORT=3306
 DB_USER=alfychat
 DB_PASSWORD=
-DB_NAME=alfychat_friends
-REDIS_URL=redis://localhost:6379
+DB_NAME=alfychat
 JWT_SECRET=
-SERVICE_REGISTRY_URL=http://gateway:3000
-```
-
-### Installation
-
-```bash
-bun install
+INTERNAL_SECRET=
+GATEWAY_URL=http://localhost:3000
+SERVICE_KEY=
+SERVICE_ENDPOINT=http://localhost:3003
 ```
 
 ### Développement
 
 ```bash
-bun run dev
+go run .
 ```
 
 ### Build production
 
 ```bash
-bun run build
-bun run start
+go build -o bin/friends .
+./bin/friends
+```
+
+### Tests
+
+```bash
+go test ./...
 ```
 
 ### Docker
@@ -84,16 +82,13 @@ docker compose up friends
 ## Structure du projet
 
 ```
-src/
-├── database.ts          # Connexion MySQL
-├── redis.ts             # Connexion Redis
-├── index.ts             # Point d'entrée
-├── controllers/         # Logique métier (amis, blocage)
-├── routes/              # Définition des routes Express
-├── services/            # Services métier
-├── middleware/          # Auth JWT, rate limiting
-├── types/               # Types TypeScript
-└── utils/               # Utilitaires
+main.go                  # Point d'entrée
+internal/
+├── friends/             # Routes amis, demandes, blocage, amis en commun
+└── platform/            # Socle commun aux services Go : HTTP (CORS, helmet,
+                         # erreurs négociées), auth, MySQL, enregistrement
+                         # auprès du gateway, remontée d'erreurs
+public/                  # Pages HTML d'accueil et d'erreur
 ```
 
 ## Contribution
