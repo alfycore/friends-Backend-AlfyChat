@@ -31,11 +31,15 @@ type ctxKey int
 const (
 	ctxBody ctxKey = iota
 	ctxUserID
+	ctxQuery
 )
 
 // Server regroupe le routeur et les réglages du pipeline.
 type Server struct {
-	Mux *http.ServeMux
+	routes []route
+	mounts []string
+	// Middlewares appliqués avant les routes, dans l'ordre (app.use(fn)).
+	middlewares []func(http.ResponseWriter, *http.Request) bool
 	// BodyLimit : taille max du JSON (express.json() = 100 ko par défaut).
 	BodyLimit int64
 	// PublicDir : dossier des pages HTML d'erreur.
@@ -53,16 +57,15 @@ func NewServer() *Server {
 		origins[i] = strings.TrimSpace(origins[i])
 	}
 	return &Server{
-		Mux:            http.NewServeMux(),
 		BodyLimit:      100 * 1024,
 		PublicDir:      "public",
 		AllowedOrigins: origins,
 	}
 }
 
-// Handle enregistre une route : "GET /friends/{id}".
-func (s *Server) Handle(pattern string, h http.HandlerFunc) {
-	s.Mux.HandleFunc(pattern, h)
+// Use ajoute un middleware global ; il renvoie false s'il a déjà répondu.
+func (s *Server) Use(mw func(http.ResponseWriter, *http.Request) bool) {
+	s.middlewares = append(s.middlewares, mw)
 }
 
 var localhostOrigin = regexp.MustCompile(`^http://localhost(:\d+)?$`)
@@ -88,15 +91,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		helmet(w.Header())
 	}
 
-	// Express ignore le slash final ("/friends/" == "/friends").
-	if len(r.URL.Path) > 1 && strings.HasSuffix(r.URL.Path, "/") {
-		r.URL.Path = strings.TrimRight(r.URL.Path, "/")
-		if r.URL.Path == "" {
-			r.URL.Path = "/"
-		}
-		r.URL.RawPath = ""
-	}
-
 	if r.Body != nil && isJSONRequest(r) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, s.BodyLimit+1))
 		if err != nil || int64(len(body)) > s.BodyLimit {
@@ -115,20 +109,29 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r = r.WithContext(context.WithValue(r.Context(), ctxBody, parsed))
 		}
 	}
+	// req.body vaut {} quand aucun JSON n'a été lu : on le pose pour que les
+	// sanitizers puissent y écrire.
+	if r.Context().Value(ctxBody) == nil {
+		r = r.WithContext(context.WithValue(r.Context(), ctxBody, O()))
+	}
+	r = r.WithContext(context.WithValue(r.Context(), ctxQuery, parseQuery(r)))
 
 	TrackRequest(0)
 	mw := &meteredWriter{ResponseWriter: w}
 
-	// Le ServeMux renvoie 405 sur une mauvaise méthode ; Express renvoie 404.
-	if _, pattern := s.Mux.Handler(r); pattern == "" {
-		if r.URL.Path == "/" && r.Method == http.MethodGet && s.prefersHTML(r) {
-			s.sendFile(mw, filepath.Join(s.PublicDir, "index.html"), http.StatusOK)
+	for _, m := range s.middlewares {
+		if !m(mw, r) {
 			return
 		}
-		s.NotFound(mw, r)
+	}
+	if s.dispatch(mw, r) {
 		return
 	}
-	s.Mux.ServeHTTP(mw, r)
+	if r.URL.Path == "/" && (r.Method == http.MethodGet || r.Method == http.MethodHead) && s.prefersHTML(r) {
+		s.sendFile(mw, filepath.Join(s.PublicDir, "index.html"), http.StatusOK)
+		return
+	}
+	s.NotFound(mw, r)
 }
 
 // meteredWriter compte les octets envoyés pour les métriques de débit.
@@ -161,7 +164,7 @@ func isJSONRequest(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	return mt == "application/json" || strings.HasSuffix(mt, "+json")
+	return mt == "application/json"
 }
 
 // ── CORS (paquet `cors` avec credentials: true) ───────────────────────────
@@ -261,7 +264,7 @@ func (s *Server) NotFound(w http.ResponseWriter, r *http.Request) {
 		s.sendFile(w, filepath.Join(s.PublicDir, "errors", "404.html"), http.StatusNotFound)
 		return
 	}
-	JSON(w, http.StatusNotFound, O("error", "Route not found", "path", r.URL.Path))
+	JSON(w, http.StatusNotFound, O("error", "Route not found", "path", r.URL.EscapedPath()))
 }
 
 // ServeError répond comme le gestionnaire d'erreurs Express (500).
@@ -323,10 +326,10 @@ func Accepts(header string, offers ...string) string {
 	}
 
 	type scored struct {
-		offer        string
-		q            float64
-		spec, order  int
-		index        int
+		offer       string
+		q           float64
+		spec, order int
+		index       int
 	}
 	var res []scored
 	for i, offer := range offers {

@@ -17,9 +17,6 @@ import (
 
 var uuidRe = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
-// isUUID reproduit le validateur isUUID() d'express-validator (versions 1 à 8, variante RFC).
-var isUUIDRe = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$|^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-
 type handlers struct {
 	db *platform.DB
 }
@@ -45,6 +42,7 @@ func Migrate(ctx context.Context, db *platform.DB) error {
 func Register(srv *platform.Server, db *platform.DB, auth *platform.Auth) {
 	h := &handlers{db: db}
 	a := auth.Require
+	srv.Mount("/friends")
 
 	srv.Handle("GET /friends", a(h.list))
 	srv.Handle("POST /friends/request", a(h.sendRequest))
@@ -374,19 +372,12 @@ func (h *handlers) declineLegacy(w http.ResponseWriter, r *http.Request) {
 // POST /friends/requests — chemin WebSocket du gateway. L'expéditeur est
 // l'utilisateur authentifié, jamais un `fromUserId` du corps (amitié forcée).
 func (h *handlers) sendRequestWS(w http.ResponseWriter, r *http.Request) {
-	body := platform.Body(r)
-	toUserID := body.Get("toUserId")
-	s, ok := toUserID.(string)
-	if !ok || !isUUIDRe.MatchString(s) {
-		errItem := platform.O("type", "field")
-		if body.Has("toUserId") {
-			errItem.Set("value", toUserID)
-		}
-		errItem.Set("msg", "Invalid value").Set("path", "toUserId").Set("location", "body")
-		platform.JSON(w, 400, platform.O("errors", []any{errItem}))
+	if errs := platform.Validate(r, platform.BodyField("toUserId").IsUUID()); len(errs) > 0 {
+		platform.JSON(w, 400, platform.O("errors", errs))
 		return
 	}
-	status, res, err := h.createFriendRequest(r.Context(), platform.UserID(r), s)
+	toUserID, _ := platform.Body(r).Get("toUserId").(string)
+	status, res, err := h.createFriendRequest(r.Context(), platform.UserID(r), toUserID)
 	if err != nil {
 		serverError(w, "Erreur envoi demande:", err)
 		return
