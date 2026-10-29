@@ -254,7 +254,7 @@ func (c *Chain) run(r *http.Request) []*Object {
 				values = a
 			}
 			for _, x := range values {
-				if it.standard(JSString(x)) == it.negated {
+				if it.standard(evString(x)) == it.negated {
 					addErr(it, x)
 				}
 			}
@@ -262,11 +262,11 @@ func (c *Chain) run(r *http.Request) []*Object {
 			if a, ok := v.([]any); ok {
 				out := make([]any, len(a))
 				for i, x := range a {
-					out[i] = it.sanitize(JSString(x))
+					out[i] = it.sanitize(evString(x))
 				}
 				setFieldValue(r, c.location, c.path, out)
 			} else {
-				setFieldValue(r, c.location, c.path, it.sanitize(JSString(v)))
+				setFieldValue(r, c.location, c.path, it.sanitize(evString(v)))
 			}
 		}
 	}
@@ -321,7 +321,7 @@ func setFieldValue(r *http.Request, location, path string, v any) {
 	case "query":
 		SetPath(Query(r), path, v)
 	case "params":
-		r.SetPathValue(path, JSString(v))
+		r.SetPathValue(path, evString(v))
 	}
 }
 
@@ -365,8 +365,8 @@ func SetPath(root *Object, path string, v any) {
 
 // ── Conversions JavaScript ────────────────────────────────────────────────
 
-// JSString reproduit le toString() d'express-validator.
-func JSString(v any) string {
+// evString reproduit le toString() d'express-validator (null/undefined → "").
+func evString(v any) string {
 	switch x := v.(type) {
 	case undefinedT, nil:
 		return ""
@@ -389,7 +389,7 @@ func JSString(v any) string {
 		parts := make([]string, len(x))
 		for i, e := range x {
 			if e != nil && e != Undefined {
-				parts[i] = JSString(e)
+				parts[i] = evString(e)
 			}
 		}
 		return strings.Join(parts, ",")

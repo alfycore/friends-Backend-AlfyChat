@@ -53,3 +53,9 @@ func MustEnv(key string) string {
 func Uptime() float64 {
 	return time.Since(startedAt).Seconds()
 }
+
+// Now renvoie l'heure tronquée à la milliseconde, comme new Date() : les
+// DATETIME arrondis par MySQL restent identiques à ceux écrits par mysql2.
+func Now() time.Time {
+	return time.Now().Truncate(time.Millisecond)
+}

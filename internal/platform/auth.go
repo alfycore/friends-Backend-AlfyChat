@@ -18,6 +18,13 @@ import (
 type Auth struct {
 	jwtSecret      []byte
 	internalSecret string
+	// Loose reproduit les middlewares qui acceptent tout en-tête Authorization
+	// (on retire seulement "Bearer ") et répondent "Token invalide" même sur
+	// un jeton expiré.
+	Loose bool
+	// InternalWithoutUser : un appel interne sans x-user-id passe quand même
+	// (userId vide), pour les routes en lecture seule du gateway.
+	InternalWithoutUser bool
 }
 
 // NewAuth refuse de démarrer sans JWT_SECRET ni INTERNAL_SECRET.
@@ -53,16 +60,26 @@ func (a *Auth) Require(next http.HandlerFunc) http.HandlerFunc {
 				next(w, WithUserID(r, uid))
 				return
 			}
+			if a.InternalWithoutUser {
+				next(w, r)
+				return
+			}
 		}
 
 		header := r.Header.Get("Authorization")
-		if !strings.HasPrefix(header, "Bearer ") {
+		var token string
+		if a.Loose {
+			token = strings.Replace(header, "Bearer ", "", 1)
+		} else if strings.HasPrefix(header, "Bearer ") {
+			token = strings.Replace(header, "Bearer ", "", 1)
+		}
+		if token == "" && (a.Loose || header == "" || !strings.HasPrefix(header, "Bearer ")) {
 			Error(w, http.StatusUnauthorized, "Token d'authentification requis")
 			return
 		}
-		claims, err := a.Verify(strings.Replace(header, "Bearer ", "", 1))
+		claims, err := a.Verify(token)
 		if err != nil {
-			if errors.Is(err, jwt.ErrTokenExpired) {
+			if !a.Loose && errors.Is(err, jwt.ErrTokenExpired) {
 				Error(w, http.StatusUnauthorized, "Token expiré")
 				return
 			}
@@ -70,7 +87,8 @@ func (a *Auth) Require(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		uid, _ := claims["userId"].(string)
-		if uid == "" {
+		// En mode Loose, un jeton valide sans userId passe avec un userId vide.
+		if uid == "" && !a.Loose {
 			Error(w, http.StatusUnauthorized, "Token invalide")
 			return
 		}

@@ -22,11 +22,22 @@ type DB struct {
 // OpenDatabase ouvre le pool avec les réglages des services TS
 // (10 connexions, keepalive, connectTimeout 10 s, idleTimeout 60 s).
 func OpenDatabase() (*DB, error) {
+	return OpenDatabaseWithDefaults("alfychat", "alfychat")
+}
+
+// OpenDatabaseWithDefaults : identifiants par défaut propres au service
+// quand DB_USER / DB_PASSWORD sont absents.
+func OpenDatabaseWithDefaults(defUser, defPassword string) (*DB, error) {
+	return OpenDatabaseSized(defUser, defPassword, 10)
+}
+
+// OpenDatabaseSized : comme OpenDatabaseWithDefaults avec une taille de pool.
+func OpenDatabaseSized(defUser, defPassword string, poolSize int) (*DB, error) {
 	cfg := mysql.NewConfig()
 	cfg.Net = "tcp"
 	cfg.Addr = fmt.Sprintf("%s:%d", Env("DB_HOST", "localhost"), EnvInt("DB_PORT", 3306))
-	cfg.User = Env("DB_USER", "alfychat")
-	cfg.Passwd = Env("DB_PASSWORD", "alfychat")
+	cfg.User = Env("DB_USER", defUser)
+	cfg.Passwd = Env("DB_PASSWORD", defPassword)
 	cfg.DBName = Env("DB_NAME", "alfychat")
 	// mysql2 lit les dates dans le fuseau du process (timezone: 'local').
 	cfg.ParseTime = true
@@ -39,8 +50,8 @@ func OpenDatabase() (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	pool.SetMaxOpenConns(10)
-	pool.SetMaxIdleConns(10)
+	pool.SetMaxOpenConns(poolSize)
+	pool.SetMaxIdleConns(poolSize)
 	pool.SetConnMaxIdleTime(60 * time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
