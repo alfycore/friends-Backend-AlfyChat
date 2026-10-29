@@ -33,6 +33,8 @@ type Auth struct {
 	NoExpired bool
 	// AllowNoUser : un jeton valide sans userId passe avec un userId vide.
 	AllowNoUser bool
+	// AccessOnly : un jeton portant un `type` autre que « access » est refusé.
+	AccessOnly bool
 }
 
 // NewAuth refuse de démarrer sans JWT_SECRET ni INTERNAL_SECRET.
@@ -99,6 +101,10 @@ func (a *Auth) Require(next http.HandlerFunc) http.HandlerFunc {
 				Error(w, http.StatusUnauthorized, "Token expiré")
 				return
 			}
+			Error(w, http.StatusUnauthorized, "Token invalide")
+			return
+		}
+		if t, ok := claims["type"]; ok && a.AccessOnly && Truthy(t) && t != "access" {
 			Error(w, http.StatusUnauthorized, "Token invalide")
 			return
 		}
