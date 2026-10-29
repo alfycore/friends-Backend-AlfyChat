@@ -139,3 +139,54 @@ func jsonEqual(a, b []byte) bool {
 	jb, _ := json.Marshal(y)
 	return string(ja) == string(jb)
 }
+
+// ISO_FIXTURES : verdicts de validator.isISO8601 (version JS) sur des dates variées.
+func TestISO8601AgainstValidatorJS(t *testing.T) {
+	path := os.Getenv("ISO_FIXTURES")
+	if path == "" {
+		t.Skip("ISO_FIXTURES non défini")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases [][]any
+	if err := json.Unmarshal(raw, &cases); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		if got := IsISO8601(c[0].(string)); got != c[1].(bool) {
+			t.Errorf("isISO8601(%q) = %v, JS %v", c[0], got, c[1])
+		}
+	}
+	t.Logf("%d cas comparés", len(cases))
+}
+
+// Résultats relevés sur express-validator pour body('participantIds.*').isString().
+func TestWildcardPaths(t *testing.T) {
+	cases := []struct {
+		body string
+		want string // chemins en erreur
+	}{
+		{`{"participantIds":["a",1,null,{}]}`, "participantIds[1] participantIds[2] participantIds[3]"},
+		{`{"participantIds":"x"}`, ""},
+		{`{}`, ""},
+		{`{"participantIds":[]}`, ""},
+		{`{"participantIds":{"a":"s","b":2}}`, "participantIds.b"},
+	}
+	for _, c := range cases {
+		parsed, _ := ParseJSON([]byte(c.body))
+		req := httptest.NewRequest("POST", "/", nil)
+		req = req.WithContext(context.WithValue(req.Context(), ctxBody, parsed))
+		got := ""
+		for _, e := range Validate(req, BodyField("participantIds.*").IsString()) {
+			if got != "" {
+				got += " "
+			}
+			got += e.Str("path")
+		}
+		if got != c.want {
+			t.Errorf("%s : %q, attendu %q", c.body, got, c.want)
+		}
+	}
+}

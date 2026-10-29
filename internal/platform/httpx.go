@@ -57,6 +57,14 @@ type Server struct {
 	SkipJSON func(*http.Request) bool
 	// StrictLocalhost : refuse les origines localhost (NODE_ENV=production).
 	StrictLocalhost bool
+	// CORSOrigin : origine unique annoncée à tous les appelants (cors({ origin: '…' })),
+	// sans rejet ni réflexion de l'origine reçue.
+	CORSOrigin string
+	// HelmetOverride : en-têtes qui remplacent ceux de helmet.
+	HelmetOverride map[string]string
+	// AllowNonHTTPOrigins : accepte les origines qui ne sont pas http(s)://
+	// (applications natives, file://, « null »).
+	AllowNonHTTPOrigins bool
 }
 
 func NewServer() *Server {
@@ -97,6 +105,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.NoHelmet && (s.SkipHelmet == nil || !s.SkipHelmet(r)) {
 		helmet(w.Header())
+		for k, v := range s.HelmetOverride {
+			w.Header().Set(k, v)
+		}
 	}
 
 	if r.Body != nil && isJSONRequest(r) {
@@ -185,7 +196,27 @@ func isJSONRequest(r *http.Request) bool {
 
 func (s *Server) cors(w http.ResponseWriter, r *http.Request) (bool, error) {
 	origin := r.Header.Get("Origin")
+	if s.CORSOrigin != "" {
+		h := w.Header()
+		h.Set("Access-Control-Allow-Origin", s.CORSOrigin)
+		h.Set("Access-Control-Allow-Credentials", "true")
+		h.Add("Vary", "Origin")
+		if r.Method == http.MethodOptions {
+			h.Set("Access-Control-Allow-Methods", "GET,HEAD,PUT,PATCH,POST,DELETE")
+			if req := r.Header.Get("Access-Control-Request-Headers"); req != "" {
+				h.Set("Access-Control-Allow-Headers", req)
+				h.Add("Vary", "Access-Control-Request-Headers")
+			}
+			h.Set("Content-Length", "0")
+			w.WriteHeader(http.StatusNoContent)
+			return true, nil
+		}
+		return false, nil
+	}
 	local := localhostOrigin.MatchString(origin) && !s.StrictLocalhost
+	if s.AllowNonHTTPOrigins && origin != "" && !strings.HasPrefix(origin, "http://") && !strings.HasPrefix(origin, "https://") {
+		local = true
+	}
 	if origin != "" && !local && !contains(s.AllowedOrigins, origin) {
 		return false, errors.New("CORS: origine non autorisée — " + origin)
 	}

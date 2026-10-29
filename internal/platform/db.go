@@ -110,3 +110,16 @@ func Args(ids []string) []any {
 	}
 	return out
 }
+
+// InTx exécute fn dans une transaction : validation si fn réussit, annulation sinon.
+func (db *DB) InTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}

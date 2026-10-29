@@ -17,6 +17,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/dlclark/regexp2"
 )
 
 // undefinedT représente `undefined` (clé absente), distinct de null.
@@ -223,9 +225,140 @@ func (c *Chain) skip(v any) bool {
 	return false
 }
 
+// fieldInst est un champ concret visé par une chaîne : un chemin sans joker, ou
+// un élément d'un chemin « a.* » (tableau → a[0], objet → a.clé).
+type fieldInst struct {
+	path string   // chemin affiché dans les erreurs
+	segs []string // clés concrètes
+}
+
+// instances résout les jokers « * » comme express-validator : tableau et objet
+// sont parcourus, toute autre valeur (ou valeur absente) ne donne aucune instance.
+func (c *Chain) instances(r *http.Request) []fieldInst {
+	segs := strings.Split(c.path, ".")
+	if !strings.Contains(c.path, "*") || c.location == "params" {
+		return []fieldInst{{path: c.path, segs: segs}}
+	}
+	var out []fieldInst
+	var walk func(node any, i int, prefix string, done []string)
+	walk = func(node any, i int, prefix string, done []string) {
+		if i == len(segs) {
+			out = append(out, fieldInst{path: prefix, segs: done})
+			return
+		}
+		seg := segs[i]
+		join := func(key string, isIndex bool) string {
+			switch {
+			case isIndex:
+				return prefix + "[" + key + "]"
+			case prefix == "":
+				return key
+			}
+			return prefix + "." + key
+		}
+		if seg != "*" {
+			var next any = Undefined
+			switch n := node.(type) {
+			case *Object:
+				if n.Has(seg) {
+					next = n.Get(seg)
+				}
+			case []any:
+				if idx, err := strconv.Atoi(seg); err == nil && idx >= 0 && idx < len(n) {
+					next = n[idx]
+				}
+			}
+			walk(next, i+1, join(seg, false), append(append([]string{}, done...), seg))
+			return
+		}
+		switch n := node.(type) {
+		case []any:
+			for idx, el := range n {
+				k := strconv.Itoa(idx)
+				walk(el, i+1, join(k, true), append(append([]string{}, done...), k))
+			}
+		case *Object:
+			for _, k := range n.Keys() {
+				walk(n.Get(k), i+1, join(k, false), append(append([]string{}, done...), k))
+			}
+		}
+	}
+	walk(locationRoot(r, c.location), 0, "", nil)
+	return out
+}
+
+func locationRoot(r *http.Request, location string) any {
+	switch location {
+	case "body":
+		return RawBody(r)
+	case "query":
+		return Query(r)
+	}
+	return nil
+}
+
+func getBySegs(root any, segs []string) any {
+	cur := root
+	for _, seg := range segs {
+		switch n := cur.(type) {
+		case *Object:
+			if !n.Has(seg) {
+				return Undefined
+			}
+			cur = n.Get(seg)
+		case []any:
+			idx, err := strconv.Atoi(seg)
+			if err != nil || idx < 0 || idx >= len(n) {
+				return Undefined
+			}
+			cur = n[idx]
+		default:
+			return Undefined
+		}
+	}
+	return cur
+}
+
+func setBySegs(root any, segs []string, v any) {
+	cur := root
+	for i, seg := range segs {
+		last := i == len(segs)-1
+		switch n := cur.(type) {
+		case *Object:
+			if last {
+				n.Set(seg, v)
+				return
+			}
+			next, ok := n.Get(seg).(*Object)
+			if !ok {
+				if arr, isArr := n.Get(seg).([]any); isArr {
+					cur = arr
+					continue
+				}
+				next = O()
+				n.Set(seg, next)
+			}
+			cur = next
+		case []any:
+			idx, err := strconv.Atoi(seg)
+			if err != nil || idx < 0 || idx >= len(n) {
+				return
+			}
+			if last {
+				n[idx] = v
+				return
+			}
+			cur = n[idx]
+		default:
+			return
+		}
+	}
+}
+
 func (c *Chain) run(r *http.Request) []*Object {
 	var errs []*Object
-	addErr := func(it *chainItem, v any) {
+	insts := c.instances(r)
+	addErr := func(it *chainItem, inst fieldInst, v any) {
 		msg := it.msg
 		if msg == "" {
 			msg = "Invalid value"
@@ -234,39 +367,52 @@ func (c *Chain) run(r *http.Request) []*Object {
 		if v != Undefined {
 			e.Set("value", v)
 		}
-		e.Set("msg", msg).Set("path", c.path).Set("location", c.location)
+		e.Set("msg", msg).Set("path", inst.path).Set("location", c.location)
 		errs = append(errs, e)
 	}
 
 	for _, it := range c.items {
-		v := fieldValue(r, c.location, c.path)
-		if c.skip(v) {
-			continue
-		}
-		switch it.kind {
-		case kindCustom:
-			if it.custom(v) == it.negated {
-				addErr(it, v)
-			}
-		case kindStandard:
-			values := []any{v}
-			if a, ok := v.([]any); ok {
-				values = a
-			}
-			for _, x := range values {
-				if it.standard(evString(x)) == it.negated {
-					addErr(it, x)
-				}
-			}
-		case kindSanitizer:
-			if a, ok := v.([]any); ok {
-				out := make([]any, len(a))
-				for i, x := range a {
-					out[i] = it.sanitize(evString(x))
-				}
-				setFieldValue(r, c.location, c.path, out)
+		for _, inst := range insts {
+			var v any
+			if c.location == "params" {
+				v = fieldValue(r, c.location, c.path)
 			} else {
-				setFieldValue(r, c.location, c.path, it.sanitize(evString(v)))
+				v = getBySegs(locationRoot(r, c.location), inst.segs)
+			}
+			if c.skip(v) {
+				continue
+			}
+			switch it.kind {
+			case kindCustom:
+				if it.custom(v) == it.negated {
+					addErr(it, inst, v)
+				}
+			case kindStandard:
+				values := []any{v}
+				if a, ok := v.([]any); ok {
+					values = a
+				}
+				for _, x := range values {
+					if it.standard(evString(x)) == it.negated {
+						addErr(it, inst, x)
+					}
+				}
+			case kindSanitizer:
+				var out any
+				if a, ok := v.([]any); ok {
+					arr := make([]any, len(a))
+					for i, x := range a {
+						arr[i] = it.sanitize(evString(x))
+					}
+					out = arr
+				} else {
+					out = it.sanitize(evString(v))
+				}
+				if c.location == "params" {
+					setFieldValue(r, c.location, c.path, out)
+				} else {
+					setBySegs(locationRoot(r, c.location), inst.segs, out)
+				}
 			}
 		}
 	}
@@ -373,6 +519,9 @@ func evString(v any) string {
 	case string:
 		return x
 	case float64:
+		if math.IsNaN(x) {
+			return ""
+		}
 		return JSNumber(x)
 	case int:
 		return strconv.Itoa(x)
@@ -560,4 +709,15 @@ func jsParseFloat(s string) float64 {
 		}
 	}
 	return math.NaN()
+}
+
+// IsISO8601 : validator.isISO8601 sans options (regex seule, syntaxe JS : le
+// moteur regexp2 en mode ECMAScript gère l'anticipation et les références arrière).
+func (c *Chain) IsISO8601() *Chain { return c.Standard(IsISO8601) }
+
+var iso8601Re = regexp2.MustCompile(`^([\+-]?\d{4}(?!\d{2}\b))((-?)((0[1-9]|1[0-2])(\3([12]\d|0[1-9]|3[01]))?|W([0-4]\d|5[0-3])(-?[1-7])?|(00[1-9]|0[1-9]\d|[12]\d{2}|3([0-5]\d|6[1-6])))([T\s]((([01]\d|2[0-3])((:?)[0-5]\d)?|24:?00)([\.,]\d+(?!:))?)?(\17[0-5]\d([\.,]\d+)?)?([zZ]|([\+-])([01]\d|2[0-3]):?([0-5]\d)?)?)?)?$`, regexp2.ECMAScript)
+
+func IsISO8601(s string) bool {
+	ok, err := iso8601Re.MatchString(s)
+	return err == nil && ok
 }
